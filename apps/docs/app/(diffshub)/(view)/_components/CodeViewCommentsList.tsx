@@ -127,7 +127,11 @@ export const CodeViewCommentsList = memo(function CodeViewCommentsList({
                   handleRowClick(event, () => onSelectComment?.(comment))
                 }
               >
-                <CommentAuthorAvatar seed={comment.author} className="size-5" />
+                <CommentAuthorAvatar
+                  seed={comment.author}
+                  avatarUrl={comment.avatarUrl}
+                  className="size-5"
+                />
                 <div className="flex flex-col gap-0.5 select-text">
                   <div className="flex gap-2">
                     <span className="text-muted-foreground">

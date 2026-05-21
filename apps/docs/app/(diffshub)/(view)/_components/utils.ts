@@ -279,6 +279,7 @@ export function upsertSavedCommentSidebarEntry(
 
   const nextEntry: CodeViewSavedCommentEntry = {
     author: entry.author,
+    avatarUrl: entry.avatarUrl,
     itemId: entry.itemId,
     key: entry.key,
     lineNumber: entry.lineNumber,

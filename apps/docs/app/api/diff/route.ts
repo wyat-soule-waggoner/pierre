@@ -2,14 +2,25 @@ import { type NextRequest } from 'next/server';
 
 const CACHE_CONTROL = 'no-store';
 const EMPTY_PATCH_MESSAGE = 'GitHub returned an empty diff.';
+const GITHUB_API_HOST = 'api.github.com';
 const GITHUB_HOST = 'github.com';
 const GITHUB_RAW_DIFF_HOST = 'patch-diff.githubusercontent.com';
+const GITHUB_DIFF_ACCEPT = 'application/vnd.github.v3.diff';
 const NON_DIFF_RESPONSE_MESSAGE = 'GitHub did not return a diff for this URL.';
 const NON_WHITESPACE_PATTERN = /\S/;
 const RAW_GITHUB_DIFF_PATH_PATTERN =
   /^\/raw\/[^/]+\/[^/]+\/pull\/[^/]+\.(?:diff|patch)$/;
 const GITHUB_PULL_TAB_PATH_PATTERN =
   /^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/(?:changes|files)$/;
+// Recognized GitHub path shapes for authenticated requests. The api.github.com
+// REST endpoints want the resource id (pull number, commit sha, compare range)
+// without any `.diff` / `.patch` suffix.
+const GITHUB_PULL_NUMBER_PATTERN = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)$/;
+const GITHUB_COMMIT_SHA_PATTERN =
+  /^\/([^/]+)\/([^/]+)\/commit\/([0-9a-f]{4,40})$/i;
+const GITHUB_COMPARE_PATTERN = /^\/([^/]+)\/([^/]+)\/compare\/(.+)$/;
+
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 const CACHED_BLOBS = new Map<string, string>([
   [
@@ -41,6 +52,7 @@ const HIDDEN_PATCH_DOMAIN_RULES = [
 interface ResolvedPatchRequest {
   patchURL: string;
   sourceURL?: string;
+  requestHeaders?: Record<string, string>;
 }
 
 // Validates the accepted path or URL, normalizes it to a raw diff URL, and
@@ -75,6 +87,7 @@ export async function GET(request: NextRequest) {
       request.signal,
       {
         sourceURL: patchRequest.sourceURL ?? patchRequest.patchURL,
+        requestHeaders: patchRequest.requestHeaders,
       }
     );
   } catch (error) {
@@ -146,8 +159,62 @@ function resolvePatchURLInput(input: string): ResolvedPatchRequest | undefined {
 function resolveGitHubPatchRequest(
   path: string
 ): ResolvedPatchRequest | undefined {
-  const patchURL = resolveGitHubPath(path);
-  return patchURL == null ? undefined : { patchURL };
+  if (path === '/') {
+    return undefined;
+  }
+
+  const normalizedPath = normalizeGitHubPath(path);
+  if (normalizedPath === '') {
+    return undefined;
+  }
+
+  const blobPatchURL = CACHED_BLOBS.get(removeDiffExtension(normalizedPath));
+  if (blobPatchURL != null) {
+    return { patchURL: blobPatchURL };
+  }
+
+  if (GITHUB_TOKEN != null && GITHUB_TOKEN !== '') {
+    const apiURL = resolveGitHubApiURL(normalizedPath);
+    if (apiURL != null) {
+      return {
+        patchURL: apiURL,
+        sourceURL: `https://${GITHUB_HOST}${normalizedPath}`,
+        requestHeaders: {
+          Accept: GITHUB_DIFF_ACCEPT,
+          Authorization: `Bearer ${GITHUB_TOKEN}`,
+        },
+      };
+    }
+  }
+
+  const anonymousPath =
+    normalizedPath.endsWith('.diff') || normalizedPath.endsWith('.patch')
+      ? normalizedPath
+      : `${normalizedPath}.diff`;
+  return { patchURL: `https://${GITHUB_HOST}${anonymousPath}` };
+}
+
+// Maps GitHub web paths onto the api.github.com REST endpoints whose `Accept:
+// application/vnd.github.v3.diff` representation returns the same plaintext
+// diff as the unauthenticated `.diff` URL. Only the three shapes we render are
+// translated; everything else falls back to the anonymous path.
+function resolveGitHubApiURL(normalizedPath: string): string | undefined {
+  const pullMatch = GITHUB_PULL_NUMBER_PATTERN.exec(normalizedPath);
+  if (pullMatch != null) {
+    return `https://${GITHUB_API_HOST}/repos/${pullMatch[1]}/${pullMatch[2]}/pulls/${pullMatch[3]}`;
+  }
+
+  const commitMatch = GITHUB_COMMIT_SHA_PATTERN.exec(normalizedPath);
+  if (commitMatch != null) {
+    return `https://${GITHUB_API_HOST}/repos/${commitMatch[1]}/${commitMatch[2]}/commits/${commitMatch[3]}`;
+  }
+
+  const compareMatch = GITHUB_COMPARE_PATTERN.exec(normalizedPath);
+  if (compareMatch != null) {
+    return `https://${GITHUB_API_HOST}/repos/${compareMatch[1]}/${compareMatch[2]}/compare/${compareMatch[3]}`;
+  }
+
+  return undefined;
 }
 
 function resolveDomainPatchURL(
@@ -192,28 +259,6 @@ function getHiddenPatchDomainRule(
   return undefined;
 }
 
-function resolveGitHubPath(path: string): string | undefined {
-  if (path === '/') {
-    return undefined;
-  }
-
-  let patchPath = normalizeGitHubPath(path);
-  if (patchPath === '') {
-    return undefined;
-  }
-
-  const blobPatchURL = CACHED_BLOBS.get(removeDiffExtension(patchPath));
-  if (blobPatchURL != null) {
-    return blobPatchURL;
-  }
-
-  if (!patchPath.endsWith('.patch') && !patchPath.endsWith('.diff')) {
-    patchPath += '.diff';
-  }
-
-  return `https://${GITHUB_HOST}${patchPath}`;
-}
-
 function removeDiffExtension(path: string): string {
   if (path.endsWith('.patch')) {
     return path.slice(0, -'.patch'.length);
@@ -245,9 +290,26 @@ function isAllowedHTTPSURL(url: URL): boolean {
   );
 }
 
+// Accepts the plaintext content types diff/patch responses come back as. The
+// anonymous github.com `.diff` endpoint returns `text/plain`; the
+// api.github.com REST endpoints with `Accept: application/vnd.github.v3.diff`
+// return that media type instead. Anything else (HTML error pages, JSON
+// payloads from a misrouted call) is treated as a non-diff response.
+function isAcceptedPatchContentType(contentType: string): boolean {
+  return (
+    contentType.startsWith('text/plain') ||
+    contentType.startsWith('application/vnd.github')
+  );
+}
+
 interface TextResponseOptions {
   status?: number;
   sourceURL?: string;
+}
+
+interface PatchStreamOptions {
+  sourceURL?: string;
+  requestHeaders?: Record<string, string>;
 }
 
 // Serves local patch fixtures through the same response path as GitHub data,
@@ -270,7 +332,7 @@ function createPatchTextResponse(
 async function createPatchStreamResponse(
   patchURL: string,
   requestSignal: AbortSignal,
-  options: Omit<TextResponseOptions, 'status'>
+  options: PatchStreamOptions
 ): Promise<Response> {
   const upstreamController = new AbortController();
   const abortUpstream = () => upstreamController.abort();
@@ -280,7 +342,10 @@ async function createPatchStreamResponse(
   try {
     response = await fetch(patchURL, {
       cache: 'no-store',
-      headers: { 'User-Agent': 'pierre-diffshub' },
+      headers: {
+        'User-Agent': 'pierre-diffshub',
+        ...options.requestHeaders,
+      },
       signal: upstreamController.signal,
     });
   } catch {
@@ -298,7 +363,7 @@ async function createPatchStreamResponse(
   }
 
   const contentType = response.headers.get('Content-Type');
-  if (contentType == null || !contentType.startsWith('text/plain')) {
+  if (contentType == null || !isAcceptedPatchContentType(contentType)) {
     requestSignal.removeEventListener('abort', abortUpstream);
     return createTextResponse(NON_DIFF_RESPONSE_MESSAGE, { status: 415 });
   }

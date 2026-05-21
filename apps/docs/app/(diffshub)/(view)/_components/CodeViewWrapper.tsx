@@ -1,4 +1,5 @@
 import {
+  type AnnotationSide,
   areSelectionsEqual,
   type CodeViewDiffItem,
   type CodeViewItem,
@@ -17,7 +18,6 @@ import {
 import { IconChevronSm } from '@pierre/icons';
 import { memo, type RefObject, useMemo, useRef, useState } from 'react';
 
-import type { AvatarName } from './annotation-shared';
 import { CODE_VIEW_CUSTOM_CSS, CODE_VIEW_LAYOUT } from './constants';
 import { DraftAnnotation } from './DraftAnnotation';
 import { ExampleAnnotation } from './ExampleAnnotation';
@@ -62,11 +62,38 @@ interface ActiveDraftComment {
   key: string;
 }
 
+export interface CodeViewSubmitDraftEvent {
+  itemId: string;
+  key: string;
+  message: string;
+  author: string;
+  lineNumber: number;
+  side: AnnotationSide;
+  range: SelectedLineRange;
+}
+
+// Result of submitting a draft to GitHub. When `accepted` is true and the
+// route attributed the comment to a GitHub user, `author` and `avatarUrl`
+// carry that identity so the locally-promoted saved comment matches what
+// GitHub now shows. Non-PR routes (commits, compares) resolve to
+// `{ accepted: true }` with no identity, keeping the random Pierre persona.
+export type CodeViewSubmitDraftResult =
+  | { accepted: false }
+  | { accepted: true; author?: string; avatarUrl?: string };
+
 interface CodeViewWrapperProps {
   className?: string;
   diffStyle: 'split' | 'unified';
   onCommentDeleted(comment: CodeViewDeletedCommentEvent): void;
   onCommentSaved(comment: CodeViewSavedCommentEvent): void;
+  // Called before a draft comment is promoted locally. When provided and the
+  // returned promise resolves to `{ accepted: false }`, the draft is left in
+  // place so the user can retry. When it resolves to `{ accepted: true }`
+  // and includes `author` / `avatarUrl`, those override the draft's random
+  // persona — used to attribute GitHub-posted comments to the real user.
+  onSubmitDraft?(
+    event: CodeViewSubmitDraftEvent
+  ): Promise<CodeViewSubmitDraftResult>;
   overflow: 'wrap' | 'scroll';
   showBackgrounds: boolean;
   diffIndicators: DiffIndicators;
@@ -83,6 +110,7 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
   diffStyle,
   onCommentDeleted,
   onCommentSaved,
+  onSubmitDraft,
   overflow,
   showBackgrounds,
   diffIndicators,
@@ -237,7 +265,7 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
   );
 
   const handleSaveDraftComment = useStableCallback(
-    (itemId: string, key: string, message: string, author: AvatarName) => {
+    async (itemId: string, key: string, message: string, author: string) => {
       const trimmedMessage = message.trim();
       const { current: viewer } = viewerRef;
       if (trimmedMessage.length === 0 || viewer == null) {
@@ -254,6 +282,27 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
       );
       if (draftAnnotation == null || !isDraftAnnotation(draftAnnotation)) {
         return;
+      }
+
+      let resolvedAuthor: string = author;
+      let resolvedAvatarUrl: string | undefined;
+      if (onSubmitDraft != null) {
+        const result = await onSubmitDraft({
+          itemId,
+          key,
+          message: trimmedMessage,
+          author,
+          lineNumber: draftAnnotation.lineNumber,
+          side: draftAnnotation.side,
+          range: draftAnnotation.metadata.range,
+        });
+        if (!result.accepted) {
+          return;
+        }
+        if (result.author != null) {
+          resolvedAuthor = result.author;
+        }
+        resolvedAvatarUrl = result.avatarUrl;
       }
 
       const updatedItem = updateViewerDiffItem(viewer, itemId, (item) => {
@@ -275,7 +324,8 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
               metadata: {
                 kind: 'saved',
                 key,
-                author,
+                author: resolvedAuthor,
+                avatarUrl: resolvedAvatarUrl,
                 message: trimmedMessage,
                 range: annotation.metadata.range,
               },
@@ -310,7 +360,8 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
       setSelectedLines(null);
       onLineLinkChange(null);
       onCommentSaved({
-        author,
+        author: resolvedAuthor,
+        avatarUrl: resolvedAvatarUrl,
         itemId,
         key,
         lineNumber: draftAnnotation.lineNumber,
@@ -370,7 +421,9 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
             annotation={annotation}
             itemId={item.id}
             onCancel={handleRemoveComment}
-            onSave={handleSaveDraftComment}
+            onSave={(itemId, key, message, author) => {
+              void handleSaveDraftComment(itemId, key, message, author);
+            }}
           />
         );
       }

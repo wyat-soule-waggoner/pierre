@@ -6,15 +6,26 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
+import { toast } from 'sonner';
 
 import { preloadAvatars } from './annotation-shared';
 import { CodeViewHeader } from './CodeViewHeader';
 import { CodeViewSidebar } from './CodeViewSidebar';
 import { CodeViewStatusPanel } from './CodeViewStatusPanel';
-import { CodeViewWrapper } from './CodeViewWrapper';
+import {
+  type CodeViewSubmitDraftEvent,
+  type CodeViewSubmitDraftResult,
+  CodeViewWrapper,
+} from './CodeViewWrapper';
+import { useGitHubViewer } from './githubViewer';
+import {
+  parsePullIdentityFromPath,
+  submitDraftCommentToGitHub,
+} from './submitDraftCommentToGitHub';
 import type {
   CodeViewDeletedCommentEvent,
   CodeViewSavedCommentEntry,
@@ -119,6 +130,59 @@ export function ReviewUI({ domain, initialUrl, path }: ReviewUIProps) {
     },
     [commentFileByItemId, setCommentSections]
   );
+  const pullIdentity = useMemo(() => parsePullIdentityFromPath(path), [path]);
+  const viewer = useGitHubViewer();
+  const handleSubmitDraft = useCallback(
+    async (
+      event: CodeViewSubmitDraftEvent
+    ): Promise<CodeViewSubmitDraftResult> => {
+      if (pullIdentity == null) {
+        // Commits and compares can't be posted to GitHub, but if we know the
+        // viewer we still attribute the local-only save to them so the saved
+        // card matches the draft preview.
+        if (viewer != null) {
+          return {
+            accepted: true,
+            author: viewer.login,
+            avatarUrl: viewer.avatarUrl,
+          };
+        }
+        return { accepted: true };
+      }
+      const file = commentFileByItemId?.get(event.itemId);
+      if (file == null) {
+        toast.error('Could not resolve the file for this comment.');
+        return { accepted: false };
+      }
+      try {
+        const result = await submitDraftCommentToGitHub({
+          pull: pullIdentity,
+          filePath: file.path,
+          body: event.message,
+          lineNumber: event.lineNumber,
+          side: event.side,
+          range: event.range,
+        });
+        toast.success('Comment posted to GitHub.', {
+          action: {
+            label: 'View',
+            onClick: () => window.open(result.htmlUrl, '_blank', 'noopener'),
+          },
+        });
+        return {
+          accepted: true,
+          author: result.author,
+          avatarUrl: result.avatarUrl,
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to post comment.';
+        toast.error(message);
+        return { accepted: false };
+      }
+    },
+    [commentFileByItemId, pullIdentity, viewer]
+  );
   const handleCommentDeleted = useCallback(
     (comment: CodeViewDeletedCommentEvent) => {
       setCommentSections((prev) =>
@@ -205,6 +269,7 @@ export function ReviewUI({ domain, initialUrl, path }: ReviewUIProps) {
             onCommentDeleted={handleCommentDeleted}
             onCommentSaved={handleCommentSaved}
             onLineLinkChange={onLineLinkChange}
+            onSubmitDraft={handleSubmitDraft}
             onViewerReady={onViewerReady}
           />
         </>
