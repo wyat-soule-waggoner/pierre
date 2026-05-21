@@ -1,6 +1,6 @@
 'use client';
 
-import { type DiffIndicators } from '@pierre/diffs';
+import { type DiffIndicators, type DiffLineAnnotation } from '@pierre/diffs';
 import { type CodeViewHandle, useWorkerPool } from '@pierre/diffs/react';
 import {
   type ReactNode,
@@ -21,7 +21,9 @@ import {
   type CodeViewSubmitDraftResult,
   CodeViewWrapper,
 } from './CodeViewWrapper';
+import { deleteGitHubComment } from './deleteGitHubComment';
 import { useGitHubViewer } from './githubViewer';
+import { loadGitHubPullComments } from './loadGitHubPullComments';
 import {
   parsePullIdentityFromPath,
   submitDraftCommentToGitHub,
@@ -34,6 +36,8 @@ import type {
 } from './types';
 import { usePatchLoader } from './usePatchLoader';
 import {
+  classifyCommentLineType,
+  isDiffItem,
   removeSavedCommentSidebarEntry,
   upsertSavedCommentSidebarEntry,
 } from './utils';
@@ -173,6 +177,7 @@ export function ReviewUI({ domain, initialUrl, path }: ReviewUIProps) {
           accepted: true,
           author: result.author,
           avatarUrl: result.avatarUrl,
+          githubCommentId: result.id,
         };
       } catch (error) {
         const message =
@@ -191,6 +196,148 @@ export function ReviewUI({ domain, initialUrl, path }: ReviewUIProps) {
     },
     [setCommentSections]
   );
+  const handleRequestRemoveComment = useCallback(
+    async (event: {
+      itemId: string;
+      key: string;
+      githubCommentId: number;
+    }): Promise<boolean> => {
+      if (pullIdentity == null) {
+        return true;
+      }
+      if (
+        !window.confirm(
+          'Delete this comment from GitHub? This cannot be undone.'
+        )
+      ) {
+        return false;
+      }
+      try {
+        await deleteGitHubComment(event.githubCommentId, pullIdentity);
+        toast.success('Comment deleted on GitHub.');
+        return true;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to delete comment.';
+        toast.error(message);
+        return false;
+      }
+    },
+    [pullIdentity]
+  );
+
+  // Once the diff has finished streaming and we know the PR + file map, fetch
+  // existing review comments and inject them as saved annotations on the
+  // matching diff items. The effect is keyed on the resource (pullIdentity +
+  // commentFileByItemId) so re-renders within the same view don't refetch,
+  // and the abort signal cancels in-flight loads on navigation.
+  useEffect(() => {
+    if (
+      pullIdentity == null ||
+      commentFileByItemId == null ||
+      loadState !== 'ready'
+    ) {
+      return;
+    }
+
+    const controller = new AbortController();
+    void (async () => {
+      let loaded: Awaited<ReturnType<typeof loadGitHubPullComments>>;
+      try {
+        loaded = await loadGitHubPullComments(pullIdentity, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Could not load PR comments.';
+        toast.error(message);
+        return;
+      }
+
+      const viewer = viewerRef.current;
+      if (viewer == null || controller.signal.aborted) {
+        return;
+      }
+
+      const pathToItemId = new Map<string, string>();
+      for (const [id, file] of commentFileByItemId) {
+        pathToItemId.set(file.path, id);
+      }
+
+      const sidebarEvents: CodeViewSavedCommentEvent[] = [];
+      for (const comment of loaded) {
+        const itemId = pathToItemId.get(comment.path);
+        if (itemId == null) {
+          continue;
+        }
+        const item = viewer.getItem(itemId);
+        if (item == null || !isDiffItem(item)) {
+          continue;
+        }
+        const key = `gh-${comment.id}`;
+        const alreadyInjected =
+          item.annotations?.some((a) => a.metadata.key === key) ?? false;
+        if (alreadyInjected) {
+          continue;
+        }
+        const annotation: DiffLineAnnotation<CommentMetadata> = {
+          side: comment.side,
+          lineNumber: comment.lineNumber,
+          metadata: {
+            kind: 'saved',
+            key,
+            author: comment.author,
+            avatarUrl: comment.avatarUrl,
+            githubCommentId: comment.id,
+            message: comment.body,
+            range: comment.range,
+          },
+        };
+        item.annotations = [...(item.annotations ?? []), annotation];
+        item.version = typeof item.version === 'number' ? item.version + 1 : 1;
+        viewer.updateItem(item);
+        sidebarEvents.push({
+          author: comment.author,
+          avatarUrl: comment.avatarUrl,
+          githubCommentId: comment.id,
+          itemId,
+          key,
+          lineNumber: comment.lineNumber,
+          lineType: classifyCommentLineType(
+            item.fileDiff,
+            comment.side,
+            comment.lineNumber
+          ),
+          message: comment.body,
+          range: comment.range,
+          side: comment.side,
+        });
+      }
+
+      if (sidebarEvents.length === 0 || controller.signal.aborted) {
+        return;
+      }
+      setCommentSections((prev) => {
+        let next = prev;
+        for (const event of sidebarEvents) {
+          next = upsertSavedCommentSidebarEntry(
+            next,
+            commentFileByItemId,
+            event
+          );
+        }
+        return next;
+      });
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [commentFileByItemId, loadState, pullIdentity, setCommentSections]);
+
   const handleToggleFileTreeOverlay = useCallback(() => {
     setFileTreeOverlayOpen((open) => !open);
   }, []);
@@ -269,6 +416,7 @@ export function ReviewUI({ domain, initialUrl, path }: ReviewUIProps) {
             onCommentDeleted={handleCommentDeleted}
             onCommentSaved={handleCommentSaved}
             onLineLinkChange={onLineLinkChange}
+            onRequestRemoveComment={handleRequestRemoveComment}
             onSubmitDraft={handleSubmitDraft}
             onViewerReady={onViewerReady}
           />

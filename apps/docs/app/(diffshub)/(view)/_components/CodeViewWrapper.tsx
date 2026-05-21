@@ -79,7 +79,12 @@ export interface CodeViewSubmitDraftEvent {
 // `{ accepted: true }` with no identity, keeping the random Pierre persona.
 export type CodeViewSubmitDraftResult =
   | { accepted: false }
-  | { accepted: true; author?: string; avatarUrl?: string };
+  | {
+      accepted: true;
+      author?: string;
+      avatarUrl?: string;
+      githubCommentId?: number;
+    };
 
 interface CodeViewWrapperProps {
   className?: string;
@@ -94,6 +99,17 @@ interface CodeViewWrapperProps {
   onSubmitDraft?(
     event: CodeViewSubmitDraftEvent
   ): Promise<CodeViewSubmitDraftResult>;
+  // Called before a saved annotation is removed locally. When provided and
+  // the returned promise resolves to false, the annotation is kept so the
+  // user can retry — used to gate on a successful GitHub PR comment DELETE.
+  // Annotations with no `githubCommentId` bypass this and are removed
+  // immediately, preserving the client-only delete behavior for drafts and
+  // for saves on commit/compare routes.
+  onRequestRemoveComment?(event: {
+    itemId: string;
+    key: string;
+    githubCommentId: number;
+  }): Promise<boolean>;
   overflow: 'wrap' | 'scroll';
   showBackgrounds: boolean;
   diffIndicators: DiffIndicators;
@@ -110,6 +126,7 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
   diffStyle,
   onCommentDeleted,
   onCommentSaved,
+  onRequestRemoveComment,
   onSubmitDraft,
   overflow,
   showBackgrounds,
@@ -221,7 +238,7 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
   );
 
   const handleRemoveComment = useStableCallback(
-    (itemId: string, key: string) => {
+    async (itemId: string, key: string) => {
       const { current: viewer } = viewerRef;
       if (viewer == null) {
         return;
@@ -233,6 +250,21 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
               (annotation) => annotation.metadata.key === key
             )
           : undefined;
+
+      const githubCommentId =
+        removedAnnotation != null && isSavedAnnotation(removedAnnotation)
+          ? removedAnnotation.metadata.githubCommentId
+          : undefined;
+      if (githubCommentId != null && onRequestRemoveComment != null) {
+        const accepted = await onRequestRemoveComment({
+          itemId,
+          key,
+          githubCommentId,
+        });
+        if (!accepted) {
+          return;
+        }
+      }
 
       updateViewerDiffItem(viewer, itemId, (item) => {
         if (item.annotations == null) {
@@ -286,6 +318,7 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
 
       let resolvedAuthor: string = author;
       let resolvedAvatarUrl: string | undefined;
+      let resolvedGitHubCommentId: number | undefined;
       if (onSubmitDraft != null) {
         const result = await onSubmitDraft({
           itemId,
@@ -303,6 +336,7 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
           resolvedAuthor = result.author;
         }
         resolvedAvatarUrl = result.avatarUrl;
+        resolvedGitHubCommentId = result.githubCommentId;
       }
 
       const updatedItem = updateViewerDiffItem(viewer, itemId, (item) => {
@@ -326,6 +360,7 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
                 key,
                 author: resolvedAuthor,
                 avatarUrl: resolvedAvatarUrl,
+                githubCommentId: resolvedGitHubCommentId,
                 message: trimmedMessage,
                 range: annotation.metadata.range,
               },
@@ -362,6 +397,7 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
       onCommentSaved({
         author: resolvedAuthor,
         avatarUrl: resolvedAvatarUrl,
+        githubCommentId: resolvedGitHubCommentId,
         itemId,
         key,
         lineNumber: draftAnnotation.lineNumber,
@@ -420,7 +456,9 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
           <DraftAnnotation
             annotation={annotation}
             itemId={item.id}
-            onCancel={handleRemoveComment}
+            onCancel={(itemId, key) => {
+              void handleRemoveComment(itemId, key);
+            }}
             onSave={(itemId, key, message, author) => {
               void handleSaveDraftComment(itemId, key, message, author);
             }}
@@ -436,7 +474,9 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
         <ExampleAnnotation
           annotation={annotation}
           itemId={item.id}
-          onDelete={handleRemoveComment}
+          onDelete={(itemId, key) => {
+            void handleRemoveComment(itemId, key);
+          }}
           onToggleSelection={handleToggleCommentSelection}
         />
       );
