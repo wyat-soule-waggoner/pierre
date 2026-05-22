@@ -20,7 +20,15 @@ interface DraftAnnotationProps {
   // is set, the draft preview attributes itself to the GitHub viewer's login
   // (not a Pierre persona). The wrapper still overrides this for PR-route
   // posts with whatever GitHub attributes the comment to server-side.
-  onSave(itemId: string, key: string, message: string, author: string): void;
+  // `avatarUrl` is forwarded too so the optimistic saved-state render uses
+  // the same image the draft preview was already showing.
+  onSave(
+    itemId: string,
+    key: string,
+    message: string,
+    author: string,
+    avatarUrl: string | undefined
+  ): void;
 }
 
 export function DraftAnnotation({
@@ -42,7 +50,13 @@ export function DraftAnnotation({
     if (trimmedMessage.length === 0) {
       return;
     }
-    onSave(itemId, annotation.metadata.key, trimmedMessage, displayAuthor);
+    onSave(
+      itemId,
+      annotation.metadata.key,
+      trimmedMessage,
+      displayAuthor,
+      displayAvatarUrl
+    );
   }
 
   function tryCancel() {

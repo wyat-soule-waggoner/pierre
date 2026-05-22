@@ -25,6 +25,7 @@ import type {
   CodeViewDeletedCommentEvent,
   CodeViewSavedCommentEvent,
   CommentMetadata,
+  DraftCommentMetadata,
 } from './types';
 import {
   classifyCommentLineType,
@@ -238,47 +239,38 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
   );
 
   const handleRemoveComment = useStableCallback(
-    async (itemId: string, key: string) => {
+    (itemId: string, key: string) => {
       const { current: viewer } = viewerRef;
       if (viewer == null) {
         return;
       }
       const item = viewer.getItem(itemId);
-      const removedAnnotation =
-        item != null && isDiffItem(item)
-          ? item.annotations?.find(
-              (annotation) => annotation.metadata.key === key
-            )
-          : undefined;
-
-      const githubCommentId =
-        removedAnnotation != null && isSavedAnnotation(removedAnnotation)
-          ? removedAnnotation.metadata.githubCommentId
-          : undefined;
-      if (githubCommentId != null && onRequestRemoveComment != null) {
-        const accepted = await onRequestRemoveComment({
-          itemId,
-          key,
-          githubCommentId,
-        });
-        if (!accepted) {
-          return;
-        }
+      if (item == null || !isDiffItem(item)) {
+        return;
       }
+      const removedAnnotation = item.annotations?.find(
+        (annotation) => annotation.metadata.key === key
+      );
+      if (removedAnnotation == null) {
+        return;
+      }
+
+      const wasSaved = isSavedAnnotation(removedAnnotation);
+      const githubCommentId = wasSaved
+        ? removedAnnotation.metadata.githubCommentId
+        : undefined;
+      const fileDiff = item.fileDiff;
 
       updateViewerDiffItem(viewer, itemId, (item) => {
         if (item.annotations == null) {
           return false;
         }
-
         const nextAnnotations = item.annotations.filter(
           (annotation) => annotation.metadata.key !== key
         );
-
         if (nextAnnotations.length === item.annotations.length) {
           return false;
         }
-
         item.annotations = nextAnnotations;
         return true;
       });
@@ -290,14 +282,73 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
 
       setSelectedLines(null);
       onLineLinkChange(null);
-      if (removedAnnotation != null && isSavedAnnotation(removedAnnotation)) {
+      if (wasSaved) {
         onCommentDeleted({ itemId, key });
       }
+
+      if (githubCommentId == null || onRequestRemoveComment == null) {
+        return;
+      }
+
+      // Background DELETE. On rejection we re-insert the annotation snapshot
+      // so the comment reappears in place; the sidebar entry is rebuilt from
+      // the snapshot's metadata (lineType requires the file's fileDiff, which
+      // we captured above).
+      void (async () => {
+        let accepted: boolean;
+        try {
+          accepted = await onRequestRemoveComment({
+            itemId,
+            key,
+            githubCommentId,
+          });
+        } catch {
+          accepted = false;
+        }
+        if (accepted) {
+          return;
+        }
+        const { current: liveViewer } = viewerRef;
+        if (liveViewer == null) {
+          return;
+        }
+        updateViewerDiffItem(liveViewer, itemId, (item) => {
+          if (item.annotations?.some((a) => a.metadata.key === key) === true) {
+            return false;
+          }
+          item.annotations = [...(item.annotations ?? []), removedAnnotation];
+          return true;
+        });
+        if (wasSaved && isSavedAnnotation(removedAnnotation)) {
+          onCommentSaved({
+            author: removedAnnotation.metadata.author,
+            avatarUrl: removedAnnotation.metadata.avatarUrl,
+            githubCommentId: removedAnnotation.metadata.githubCommentId,
+            itemId,
+            key,
+            lineNumber: removedAnnotation.lineNumber,
+            lineType: classifyCommentLineType(
+              fileDiff,
+              removedAnnotation.side,
+              removedAnnotation.lineNumber
+            ),
+            message: removedAnnotation.metadata.message,
+            range: removedAnnotation.metadata.range,
+            side: removedAnnotation.side,
+          });
+        }
+      })();
     }
   );
 
   const handleSaveDraftComment = useStableCallback(
-    async (itemId: string, key: string, message: string, author: string) => {
+    (
+      itemId: string,
+      key: string,
+      message: string,
+      author: string,
+      avatarUrl: string | undefined
+    ) => {
       const trimmedMessage = message.trim();
       const { current: viewer } = viewerRef;
       if (trimmedMessage.length === 0 || viewer == null) {
@@ -309,41 +360,22 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
         return;
       }
 
-      const draftAnnotation = item?.annotations?.find(
+      const draftAnnotation = item.annotations?.find(
         (annotation) => annotation.metadata.key === key
       );
       if (draftAnnotation == null || !isDraftAnnotation(draftAnnotation)) {
         return;
       }
 
-      let resolvedAuthor: string = author;
-      let resolvedAvatarUrl: string | undefined;
-      let resolvedGitHubCommentId: number | undefined;
-      if (onSubmitDraft != null) {
-        const result = await onSubmitDraft({
-          itemId,
-          key,
-          message: trimmedMessage,
-          author,
-          lineNumber: draftAnnotation.lineNumber,
-          side: draftAnnotation.side,
-          range: draftAnnotation.metadata.range,
-        });
-        if (!result.accepted) {
-          return;
-        }
-        if (result.author != null) {
-          resolvedAuthor = result.author;
-        }
-        resolvedAvatarUrl = result.avatarUrl;
-        resolvedGitHubCommentId = result.githubCommentId;
-      }
+      const draftSide = draftAnnotation.side;
+      const draftLineNumber = draftAnnotation.lineNumber;
+      const draftRange = draftAnnotation.metadata.range;
+      const fileDiff = item.fileDiff;
 
-      const updatedItem = updateViewerDiffItem(viewer, itemId, (item) => {
+      const promoted = updateViewerDiffItem(viewer, itemId, (item) => {
         if (item.annotations == null) {
           return false;
         }
-
         const nextAnnotations: DiffLineAnnotation<CommentMetadata>[] =
           item.annotations.map((annotation) => {
             if (
@@ -352,15 +384,13 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
             ) {
               return annotation;
             }
-
             return {
               ...annotation,
               metadata: {
                 kind: 'saved',
                 key,
-                author: resolvedAuthor,
-                avatarUrl: resolvedAvatarUrl,
-                githubCommentId: resolvedGitHubCommentId,
+                author,
+                avatarUrl,
                 message: trimmedMessage,
                 range: annotation.metadata.range,
               },
@@ -374,16 +404,13 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
             break;
           }
         }
-
         if (!didChange) {
           return false;
         }
-
         item.annotations = nextAnnotations;
         return true;
       });
-
-      if (updatedItem == null) {
+      if (promoted == null) {
         return;
       }
 
@@ -391,25 +418,145 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
       if (activeDraft?.itemId === itemId && activeDraft.key === key) {
         activeDraftRef.current = null;
       }
-
       setSelectedLines(null);
       onLineLinkChange(null);
       onCommentSaved({
-        author: resolvedAuthor,
-        avatarUrl: resolvedAvatarUrl,
-        githubCommentId: resolvedGitHubCommentId,
+        author,
+        avatarUrl,
         itemId,
         key,
-        lineNumber: draftAnnotation.lineNumber,
-        lineType: classifyCommentLineType(
-          item.fileDiff,
-          draftAnnotation.side,
-          draftAnnotation.lineNumber
-        ),
+        lineNumber: draftLineNumber,
+        lineType: classifyCommentLineType(fileDiff, draftSide, draftLineNumber),
         message: trimmedMessage,
-        range: draftAnnotation.metadata.range,
-        side: draftAnnotation.side,
+        range: draftRange,
+        side: draftSide,
       });
+
+      if (onSubmitDraft == null) {
+        return;
+      }
+
+      // Background POST. On success, patch the saved annotation with the real
+      // GitHub id (and any author/avatar GitHub overrode). On rejection,
+      // revert the saved back to a draft so the user keeps their text and can
+      // retry; the toast on the ReviewUI side explains the failure.
+      void (async () => {
+        let result: CodeViewSubmitDraftResult;
+        try {
+          result = await onSubmitDraft({
+            itemId,
+            key,
+            message: trimmedMessage,
+            author,
+            lineNumber: draftLineNumber,
+            side: draftSide,
+            range: draftRange,
+          });
+        } catch {
+          result = { accepted: false };
+        }
+
+        const { current: liveViewer } = viewerRef;
+        if (liveViewer == null) {
+          return;
+        }
+
+        if (result.accepted) {
+          const nextAuthor = result.author ?? author;
+          const nextAvatarUrl = result.avatarUrl ?? avatarUrl;
+          const nextGithubCommentId = result.githubCommentId;
+          const authorChanged = nextAuthor !== author;
+          const avatarChanged = nextAvatarUrl !== avatarUrl;
+          if (!authorChanged && !avatarChanged && nextGithubCommentId == null) {
+            return;
+          }
+          const patched = updateViewerDiffItem(liveViewer, itemId, (item) => {
+            if (item.annotations == null) {
+              return false;
+            }
+            let didChange = false;
+            const nextAnnotations = item.annotations.map((annotation) => {
+              if (
+                annotation.metadata.key !== key ||
+                !isSavedAnnotation(annotation)
+              ) {
+                return annotation;
+              }
+              didChange = true;
+              return {
+                ...annotation,
+                metadata: {
+                  ...annotation.metadata,
+                  author: nextAuthor,
+                  avatarUrl: nextAvatarUrl,
+                  githubCommentId: nextGithubCommentId,
+                },
+              };
+            });
+            if (!didChange) {
+              return false;
+            }
+            item.annotations = nextAnnotations;
+            return true;
+          });
+          // Skip the sidebar refresh when the saved annotation is gone — the
+          // user removed it before the POST completed, and re-emitting an
+          // onCommentSaved event would resurrect the sidebar entry without a
+          // corresponding inline annotation.
+          if (patched == null) {
+            return;
+          }
+          onCommentSaved({
+            author: nextAuthor,
+            avatarUrl: nextAvatarUrl,
+            githubCommentId: nextGithubCommentId,
+            itemId,
+            key,
+            lineNumber: draftLineNumber,
+            lineType: classifyCommentLineType(
+              fileDiff,
+              draftSide,
+              draftLineNumber
+            ),
+            message: trimmedMessage,
+            range: draftRange,
+            side: draftSide,
+          });
+          return;
+        }
+
+        updateViewerDiffItem(liveViewer, itemId, (item) => {
+          if (item.annotations == null) {
+            return false;
+          }
+          let didChange = false;
+          const nextAnnotations = item.annotations.map((annotation) => {
+            if (
+              annotation.metadata.key !== key ||
+              !isSavedAnnotation(annotation)
+            ) {
+              return annotation;
+            }
+            didChange = true;
+            const revertedMetadata: DraftCommentMetadata = {
+              kind: 'draft',
+              key,
+              message: trimmedMessage,
+              range: draftRange,
+            };
+            return {
+              ...annotation,
+              metadata: revertedMetadata,
+            };
+          });
+          if (!didChange) {
+            return false;
+          }
+          item.annotations = nextAnnotations;
+          return true;
+        });
+        onCommentDeleted({ itemId, key });
+      })();
     }
   );
 
@@ -456,12 +603,8 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
           <DraftAnnotation
             annotation={annotation}
             itemId={item.id}
-            onCancel={(itemId, key) => {
-              void handleRemoveComment(itemId, key);
-            }}
-            onSave={(itemId, key, message, author) => {
-              void handleSaveDraftComment(itemId, key, message, author);
-            }}
+            onCancel={handleRemoveComment}
+            onSave={handleSaveDraftComment}
           />
         );
       }
@@ -474,9 +617,7 @@ export const CodeViewWrapper = memo(function CodeViewWrapper({
         <ExampleAnnotation
           annotation={annotation}
           itemId={item.id}
-          onDelete={(itemId, key) => {
-            void handleRemoveComment(itemId, key);
-          }}
+          onDelete={handleRemoveComment}
           onToggleSelection={handleToggleCommentSelection}
         />
       );

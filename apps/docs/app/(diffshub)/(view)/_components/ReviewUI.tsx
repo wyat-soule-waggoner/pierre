@@ -205,16 +205,8 @@ export function ReviewUI({ domain, initialUrl, path }: ReviewUIProps) {
       if (pullIdentity == null) {
         return true;
       }
-      if (
-        !window.confirm(
-          'Delete this comment from GitHub? This cannot be undone.'
-        )
-      ) {
-        return false;
-      }
       try {
         await deleteGitHubComment(event.githubCommentId, pullIdentity);
-        toast.success('Comment deleted on GitHub.');
         return true;
       } catch (error) {
         const message =
