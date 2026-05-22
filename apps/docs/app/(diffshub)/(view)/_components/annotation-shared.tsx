@@ -70,8 +70,12 @@ export function getCommentPersona(seed: string): Persona {
 }
 
 interface CommentAuthorAvatarProps {
-  // A stable seed (e.g. comment key or a fixed name) used to pick the avatar.
+  // A stable seed (e.g. comment key or a fixed name) used to pick a Pierre
+  // persona avatar when no explicit URL is supplied.
   seed: string;
+  // Absolute URL of the author's avatar — when present, displayed verbatim
+  // instead of resolving a Pierre persona. Used for GitHub-attributed comments.
+  avatarUrl?: string;
   className?: string;
 }
 
@@ -79,8 +83,18 @@ interface CommentAuthorAvatarProps {
 // Defaults to 32px (size-8); pass className to override for other sizes.
 export function CommentAuthorAvatar({
   seed,
+  avatarUrl,
   className,
 }: CommentAuthorAvatarProps) {
+  if (avatarUrl != null && avatarUrl !== '') {
+    return (
+      <img
+        src={avatarUrl}
+        alt={seed}
+        className={cn('size-8 shrink-0 rounded-full object-cover', className)}
+      />
+    );
+  }
   const { name, avatarSrc } = getCommentPersona(seed);
   return (
     <img

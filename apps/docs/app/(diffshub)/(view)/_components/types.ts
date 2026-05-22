@@ -12,6 +12,15 @@ export interface SavedCommentMetadata {
   kind: 'saved';
   key: string;
   author: string;
+  // Absolute URL to the comment author's avatar. Set when the comment was
+  // posted to GitHub so the local UI shows the real GitHub identity; absent
+  // for client-only drafts on commit/compare routes, which fall back to a
+  // hashed Pierre persona avatar via getCommentPersona.
+  avatarUrl?: string;
+  // GitHub PR review comment id. Set for both freshly posted comments and
+  // comments loaded from GitHub on page mount; absent for client-only drafts
+  // on commit/compare routes. Used as the target for DELETE on GitHub.
+  githubCommentId?: number;
   message: string;
   range: SelectedLineRange;
 }
@@ -42,6 +51,8 @@ export type CommentLineType = 'change' | 'context';
 
 export interface CodeViewSavedCommentEvent {
   author: string;
+  avatarUrl?: string;
+  githubCommentId?: number;
   itemId: string;
   key: string;
   lineNumber: number;
@@ -58,6 +69,8 @@ export interface CodeViewDeletedCommentEvent {
 
 export interface CodeViewSavedCommentEntry {
   author: string;
+  avatarUrl?: string;
+  githubCommentId?: number;
   itemId: string;
   key: string;
   lineNumber: number;

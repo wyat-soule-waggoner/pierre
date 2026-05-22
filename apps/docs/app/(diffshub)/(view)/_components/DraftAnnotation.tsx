@@ -4,10 +4,10 @@ import { useEffect, useRef, useState } from 'react';
 
 import {
   annotationCardBase,
-  type AvatarName,
   CommentAuthorAvatar,
   getRandomPersona,
 } from './annotation-shared';
+import { useGitHubViewer } from './githubViewer';
 import type { DraftCommentMetadata } from './types';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -16,11 +16,18 @@ interface DraftAnnotationProps {
   annotation: DiffLineAnnotation<DraftCommentMetadata>;
   itemId: string;
   onCancel(itemId: string, key: string): void;
+  // `author` is widened from AvatarName to string because, when GITHUB_TOKEN
+  // is set, the draft preview attributes itself to the GitHub viewer's login
+  // (not a Pierre persona). The wrapper still overrides this for PR-route
+  // posts with whatever GitHub attributes the comment to server-side.
+  // `avatarUrl` is forwarded too so the optimistic saved-state render uses
+  // the same image the draft preview was already showing.
   onSave(
     itemId: string,
     key: string,
     message: string,
-    author: AvatarName
+    author: string,
+    avatarUrl: string | undefined
   ): void;
 }
 
@@ -32,14 +39,24 @@ export function DraftAnnotation({
 }: DraftAnnotationProps) {
   const [message, setMessage] = useState(annotation.metadata.message);
   const [persona] = useState(getRandomPersona);
+  const viewer = useGitHubViewer();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const trimmedMessage = message.trim();
+
+  const displayAuthor = viewer?.login ?? persona.name;
+  const displayAvatarUrl = viewer?.avatarUrl;
 
   function handleSave() {
     if (trimmedMessage.length === 0) {
       return;
     }
-    onSave(itemId, annotation.metadata.key, trimmedMessage, persona.name);
+    onSave(
+      itemId,
+      annotation.metadata.key,
+      trimmedMessage,
+      displayAuthor,
+      displayAvatarUrl
+    );
   }
 
   function tryCancel() {
@@ -69,7 +86,10 @@ export function DraftAnnotation({
       }}
     >
       <div className="flex w-full gap-2.5">
-        <CommentAuthorAvatar seed={persona.name} />
+        <CommentAuthorAvatar
+          seed={displayAuthor}
+          avatarUrl={displayAvatarUrl}
+        />
         <textarea
           ref={textareaRef}
           value={message}
